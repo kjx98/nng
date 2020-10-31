@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -11,18 +11,6 @@
 #include "core/nng_impl.h"
 
 typedef struct nni_taskq_thr nni_taskq_thr;
-struct nni_task {
-	nni_list_node task_node;
-	void *        task_arg;
-	nni_cb        task_cb;
-	nni_taskq *   task_tq;
-	nni_thr *     task_thr; // non-NULL if the task is running
-	unsigned      task_busy;
-	bool          task_prep;
-	bool          task_reap; // reap task on completion
-	nni_mtx       task_mtx;
-	nni_cv        task_cv;
-};
 struct nni_taskq_thr {
 	nni_taskq *tqt_tq;
 	nni_thr    tqt_thread;
@@ -46,14 +34,14 @@ nni_taskq_thread(void *self)
 	nni_taskq *    tq  = thr->tqt_tq;
 	nni_task *     task;
 
-	nni_mtx_lock(&tq->tq_mtx);
+        nni_thr_set_name(NULL, "nng:task");
+
+        nni_mtx_lock(&tq->tq_mtx);
 	for (;;) {
 		if ((task = nni_list_first(&tq->tq_tasks)) != NULL) {
-			bool reap;
 
 			nni_mtx_lock(&task->task_mtx);
 			nni_list_remove(&tq->tq_tasks, task);
-			task->task_thr = &thr->tqt_thread;
 			nni_mtx_unlock(&task->task_mtx);
 
 			nni_mtx_unlock(&tq->tq_mtx);
@@ -62,16 +50,11 @@ nni_taskq_thread(void *self)
 
 			nni_mtx_lock(&task->task_mtx);
 			task->task_busy--;
-			task->task_thr = NULL;
-			reap           = task->task_reap;
 			if (task->task_busy == 0) {
 				nni_cv_wake(&task->task_cv);
 			}
 			nni_mtx_unlock(&task->task_mtx);
 
-			if (reap) {
-				nni_task_fini(task);
-			}
 			nni_mtx_lock(&tq->tq_mtx);
 
 			continue;
@@ -148,7 +131,6 @@ nni_taskq_fini(nni_taskq *tq)
 void
 nni_task_exec(nni_task *task)
 {
-	bool reap;
 	nni_mtx_lock(&task->task_mtx);
 	if (task->task_prep) {
 		task->task_prep = false;
@@ -166,12 +148,7 @@ nni_task_exec(nni_task *task)
 	if (task->task_busy == 0) {
 		nni_cv_wake(&task->task_cv);
 	}
-	reap = task->task_reap;
 	nni_mtx_unlock(&task->task_mtx);
-
-	if (reap) {
-		nni_task_fini(task);
-	}
 }
 
 void
@@ -209,6 +186,20 @@ nni_task_prep(nni_task *task)
 }
 
 void
+nni_task_abort(nni_task *task)
+{
+	// This is called when unscheduling the task.
+	nni_mtx_lock(&task->task_mtx);
+	if (task->task_prep) {
+		task->task_prep = false;
+		task->task_busy--;
+		if (task->task_busy == 0) {
+			nni_cv_wake(&task->task_cv);
+		}
+	}
+	nni_mtx_unlock(&task->task_mtx);
+}
+void
 nni_task_wait(nni_task *task)
 {
 	nni_mtx_lock(&task->task_mtx);
@@ -218,47 +209,29 @@ nni_task_wait(nni_task *task)
 	nni_mtx_unlock(&task->task_mtx);
 }
 
-int
-nni_task_init(nni_task **taskp, nni_taskq *tq, nni_cb cb, void *arg)
+void
+nni_task_init(nni_task *task, nni_taskq *tq, nni_cb cb, void *arg)
 {
-	nni_task *task;
-
-	if ((task = NNI_ALLOC_STRUCT(task)) == NULL) {
-		return (NNG_ENOMEM);
-	}
 	NNI_LIST_NODE_INIT(&task->task_node);
 	nni_mtx_init(&task->task_mtx);
 	nni_cv_init(&task->task_cv, &task->task_mtx);
 	task->task_prep = false;
-	task->task_reap = false;
 	task->task_busy = 0;
 	task->task_cb   = cb;
 	task->task_arg  = arg;
 	task->task_tq   = tq != NULL ? tq : nni_taskq_systq;
-	*taskp          = task;
-	return (0);
 }
 
 void
 nni_task_fini(nni_task *task)
 {
 	nni_mtx_lock(&task->task_mtx);
-
-	// If we are being called from the task function, then
-	// defer the reap until after the callback has finished.
-	if (task->task_busy && (task->task_thr != NULL) &&
-	    nni_thr_is_self(task->task_thr)) {
-		task->task_reap = true;
-		nni_mtx_unlock(&task->task_mtx);
-		return;
-	}
 	while (task->task_busy) {
 		nni_cv_wait(&task->task_cv);
 	}
 	nni_mtx_unlock(&task->task_mtx);
 	nni_cv_fini(&task->task_cv);
 	nni_mtx_fini(&task->task_mtx);
-	NNI_FREE_STRUCT(task);
 }
 
 int
@@ -268,11 +241,13 @@ nni_taskq_sys_init(void)
 
 #ifndef NNG_NUM_TASKQ_THREADS
 	nthrs = nni_plat_ncpu() * 2;
-	if (nthrs < 2) {
-		nthrs = 2;
-	}
 #else
 	nthrs = NNG_NUM_TASKQ_THREADS;
+#endif
+#if NNG_MAX_TASKQ_THREADS > 0
+	if (nthrs > NNG_MAX_TASKQ_THREADS) {
+		nthrs = NNG_MAX_TASKQ_THREADS;
+	}
 #endif
 
 	return (nni_taskq_init(&nni_taskq_systq, nthrs));

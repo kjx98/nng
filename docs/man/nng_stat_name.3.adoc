@@ -1,5 +1,5 @@
 = nng_stat_name(3)
-//
+
 // Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
@@ -7,7 +7,6 @@
 // copy of which should be located in the distribution where this
 // file was obtained (LICENSE.txt).  A copy of the license may also be
 // found online at https://opensource.org/licenses/MIT.
-//
 
 == NAME
 
@@ -28,7 +27,7 @@ const char *nng_stat_name(nng_stat *stat);
 
 The `nng_stat_name()` function returns the name for the statistic _stat_.
 
-NOTE: The global root statistic will have the empty string ("") as it`'s name.
+NOTE: The global root statistic will have the empty string ("") as it's name.
 
 == RETURN VALUES
 
@@ -41,7 +40,7 @@ None.
 == SEE ALSO
 
 [.text-left]
-<<libnng.3#,libnng(3)>>,
-<<nng_stats_get.3#,nng_stats_get(3)>>,
-<<nng_stat.5#,nng_stat(5)>>,
-<<nng.7#,nng(7)>>
+xref:libnng.3.adoc[libnng(3)],
+xref:nng_stats_get.3.adoc[nng_stats_get(3)],
+xref:nng_stat.5.adoc[nng_stat(5)],
+xref:nng.7.adoc[nng(7)]

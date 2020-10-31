@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "core/nng_impl.h"
+#include "zthash.h"
 
 #include "nng/transport/zerotier/zerotier.h"
 
@@ -31,7 +32,7 @@
 // to the Internet to use this.  (Or at least to your Planetary root.)
 //
 // Because ZeroTier takes a while to establish connectivity, it is even
-// more important that applicaitons using the ZeroTier transport not
+// more important that applications using the ZeroTier transport not
 // assume that a connection will be immediately available.  It can take
 // quite a few seconds for peer-to-peer connectivity to be established.
 //
@@ -78,7 +79,7 @@ static const uint32_t     zt_port_mask = 0xffffffu; // mask of valid ports
 static const uint32_t     zt_port_shift = 24;
 static const int          zt_conn_tries = 240;   // max connect attempts
 static const nng_duration zt_conn_time  = 500;   // between attempts (msec)
-static const int          zt_ping_tries = 5;     // max keepalive attempts
+static const int          zt_ping_tries = 10;    // max keepalive attempts
 static const nng_duration zt_ping_time  = 60000; // keepalive time (msec)
 
 // These are compile time tunables for now.
@@ -131,14 +132,14 @@ enum zt_errors {
 	zt_err_refused = 0x01, // Connection refused
 	zt_err_notconn = 0x02, // Connection does not exit
 	zt_err_wrongsp = 0x03, // SP protocol mismatch
-	zt_err_proto   = 0x04, // Other protocol errror
+	zt_err_proto   = 0x04, // Other protocol error
 	zt_err_msgsize = 0x05, // Message to large
 	zt_err_unknown = 0x06, // Other errors
 };
 
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
-// support different nodes (identities) based on different homedirs.
+// support different nodes (identities) based on different home dirs.
 // This means we need to stick these on a global linked list, manage
 // them with a reference count, and uniquely identify them using the
 // homedir.
@@ -153,10 +154,10 @@ struct zt_node {
 	nni_plat_udp *  zn_udp6;
 	nni_list        zn_eplist;
 	nni_list        zn_plist;
-	nni_idhash *    zn_ports;
-	nni_idhash *    zn_eps;
-	nni_idhash *    zn_lpipes;
-	nni_idhash *    zn_rpipes;
+	zt_hash *       zn_ports;
+	zt_hash *       zn_eps;
+	zt_hash *       zn_lpipes;
+	zt_hash *       zn_rpipes;
 	nni_aio *       zn_rcv4_aio;
 	uint8_t *       zn_rcv4_buf;
 	nng_sockaddr    zn_rcv4_addr;
@@ -263,7 +264,7 @@ struct zt_ep {
 // honest we don't think anyone will be using the ZeroTier transport in
 // performance critical applications; scalability may become a factor for
 // large servers sitting in a ZeroTier hub situation.  (Then again, since
-// only the zerotier procesing is single threaded, it may not
+// only the zerotier processing is single threaded, it may not
 // be that much of a bottleneck -- really depends on how expensive these
 // operations are.  We can use lockstat or other lock-hotness tools to
 // check for this later.)
@@ -432,7 +433,7 @@ static uint64_t
 zt_mac_to_node(uint64_t mac, uint64_t nwid)
 {
 	uint64_t node;
-	// This extracts a node address from a mac addres.  The
+	// This extracts a node address from a mac address.  The
 	// network ID is mixed in, and has to be extricated.  We
 	// the node ID is located in the lower 40 bits, and scrambled
 	// against the nwid.
@@ -657,8 +658,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// Do we already have a matching pipe?  If so, we can discard
 	// the operation.  This should not happen, since we normally,
 	// deregister the endpoint when we create the pipe.
-	if ((nni_idhash_find(ztn->zn_lpipes, ep->ze_laddr, (void **) &p)) ==
-	    0) {
+	if ((zt_hash_find(ztn->zn_lpipes, ep->ze_laddr, (void **) &p)) == 0) {
 		return;
 	}
 
@@ -672,7 +672,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// Reset the address of the endpoint, so that the next call to
 	// ep_connect will bind a new one -- we are using this one for the
 	// pipe.
-	nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
+	zt_hash_remove(ztn->zn_eps, ep->ze_laddr);
 	ep->ze_laddr = 0;
 
 	nni_aio_set_output(aio, 0, p);
@@ -699,7 +699,7 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 
 	// If we already have created a pipe for this connection
 	// then just reply the conn ack.
-	if ((nni_idhash_find(ztn->zn_rpipes, raddr, (void **) &p)) == 0) {
+	if ((zt_hash_find(ztn->zn_rpipes, raddr, (void **) &p)) == 0) {
 		zt_pipe_send_conn_ack(p);
 		return;
 	}
@@ -841,12 +841,13 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 	// that we only can catch the case where a message is larger by
 	// more than a fragment, since the final fragment may be shorter,
 	// and we won't know that until we receive it.
-	if ((nfrags * fragsz) >= (p->zp_rcvmax + fragsz)) {
+	if ((p->zp_rcvmax > 0) &&
+	    ((nfrags * fragsz) >= (p->zp_rcvmax + fragsz))) {
 		// Discard, as the forwarder might be on the other side
 		// of a device. This is gentler than just shutting the pipe
 		// down.  Sending a remote error might be polite, but since
 		// most peers will close the pipe on such an error, we
-		// simply silent discard it.
+		// simply silently discard it.
 		return;
 	}
 
@@ -1082,21 +1083,21 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 	// vs. client pipes separately.
 
 	// If its a local address match on a client pipe, process it.
-	if ((nni_idhash_find(ztn->zn_lpipes, laddr, (void *) &p) == 0) &&
+	if ((zt_hash_find(ztn->zn_lpipes, laddr, (void *) &p) == 0) &&
 	    (p->zp_nwid == nwid) && (p->zp_raddr == raddr)) {
 		zt_pipe_virtual_recv(p, op, data, len);
 		return;
 	}
 
 	// If its a remote address match on a server pipe, process it.
-	if ((nni_idhash_find(ztn->zn_rpipes, raddr, (void *) &p) == 0) &&
+	if ((zt_hash_find(ztn->zn_rpipes, raddr, (void *) &p) == 0) &&
 	    (p->zp_nwid == nwid) && (p->zp_laddr == laddr)) {
 		zt_pipe_virtual_recv(p, op, data, len);
 		return;
 	}
 
 	// No pipe, so look for an endpoint.
-	if ((nni_idhash_find(ztn->zn_eps, laddr, (void **) &ep) == 0) &&
+	if ((zt_hash_find(ztn->zn_eps, laddr, (void **) &ep) == 0) &&
 	    (ep->ze_nwid == nwid)) {
 		// direct this to an endpoint.
 		zt_ep_virtual_recv(ep, op, raddr, data, len);
@@ -1326,12 +1327,12 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 		return (-1);
 	}
 
-	if (nni_aio_init(&aio, NULL, NULL) != 0) {
+	if (nni_aio_alloc(&aio, NULL, NULL) != 0) {
 		// Out of memory
 		return (-1);
 	}
 	if ((buf = nni_alloc(sizeof(*hdr) + len)) == NULL) {
-		nni_aio_fini(aio);
+		nni_aio_free(aio);
 		return (-1);
 	}
 
@@ -1358,7 +1359,7 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 	// care which.  (There may be a few thread context switches, but
 	// none of them are going to have to wait for some unbounded time.)
 	nni_aio_wait(aio);
-	nni_aio_fini(aio);
+	nni_aio_free(aio);
 	nni_free(hdr, hdr->len + sizeof(*hdr));
 
 	return (0);
@@ -1405,11 +1406,11 @@ zt_node_destroy(zt_node *ztn)
 	if (ztn->zn_flock != NULL) {
 		nni_file_unlock(ztn->zn_flock);
 	}
-	nni_aio_fini(ztn->zn_rcv4_aio);
-	nni_aio_fini(ztn->zn_rcv6_aio);
-	nni_idhash_fini(ztn->zn_eps);
-	nni_idhash_fini(ztn->zn_lpipes);
-	nni_idhash_fini(ztn->zn_rpipes);
+	nni_aio_free(ztn->zn_rcv4_aio);
+	nni_aio_free(ztn->zn_rcv6_aio);
+	zt_hash_fini(ztn->zn_eps);
+	zt_hash_fini(ztn->zn_lpipes);
+	zt_hash_fini(ztn->zn_rpipes);
 	nni_cv_fini(&ztn->zn_bgcv);
 	NNI_FREE_STRUCT(ztn);
 }
@@ -1439,24 +1440,25 @@ zt_node_create(zt_node **ztnp, const char *path)
 	NNI_LIST_INIT(&ztn->zn_eplist, zt_ep, ze_link);
 	NNI_LIST_INIT(&ztn->zn_plist, zt_pipe, zp_link);
 	nni_cv_init(&ztn->zn_bgcv, &zt_lk);
-	nni_aio_init(&ztn->zn_rcv4_aio, zt_node_rcv4_cb, ztn);
-	nni_aio_init(&ztn->zn_rcv6_aio, zt_node_rcv6_cb, ztn);
+	nni_aio_alloc(&ztn->zn_rcv4_aio, zt_node_rcv4_cb, ztn);
+	nni_aio_alloc(&ztn->zn_rcv6_aio, zt_node_rcv6_cb, ztn);
 
 	if (((ztn->zn_rcv4_buf = nni_alloc(zt_rcv_bufsize)) == NULL) ||
 	    ((ztn->zn_rcv6_buf = nni_alloc(zt_rcv_bufsize)) == NULL)) {
 		zt_node_destroy(ztn);
 		return (NNG_ENOMEM);
 	}
-	if (((rv = nni_idhash_init(&ztn->zn_ports)) != 0) ||
-	    ((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
-	    ((rv = nni_idhash_init(&ztn->zn_lpipes)) != 0) ||
-	    ((rv = nni_idhash_init(&ztn->zn_rpipes)) != 0) ||
+	if (((rv = zt_hash_init(&ztn->zn_ports)) != 0) ||
+	    ((rv = zt_hash_init(&ztn->zn_eps)) != 0) ||
+	    ((rv = zt_hash_init(&ztn->zn_lpipes)) != 0) ||
+	    ((rv = zt_hash_init(&ztn->zn_rpipes)) != 0) ||
 	    ((rv = nni_thr_init(&ztn->zn_bgthr, zt_bgthr, ztn)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp4, &sa4)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp6, &sa6)) != 0)) {
 		zt_node_destroy(ztn);
 		return (rv);
 	}
+	nni_thr_set_name(&ztn->zn_bgthr, "nng:zt");
 
 	if (strlen(path) > 0) {
 		char *lkfile;
@@ -1478,7 +1480,7 @@ zt_node_create(zt_node **ztnp, const char *path)
 	// higher than the max port, and starting with an
 	// initial random value.  Note that this should give us
 	// about 8 million possible ephemeral ports.
-	nni_idhash_set_limits(ztn->zn_ports, zt_ephemeral, zt_max_port,
+	zt_hash_limits(ztn->zn_ports, zt_ephemeral, zt_max_port,
 	    (nni_random() % (zt_max_port - zt_ephemeral)) + zt_ephemeral);
 
 	nni_strlcpy(ztn->zn_path, path, sizeof(ztn->zn_path));
@@ -1610,6 +1612,104 @@ zt_tran_fini(void)
 	nni_mtx_fini(&zt_lk);
 }
 
+static int
+zt_check_recvmaxsz(const void *v, size_t sz, nni_type t)
+{
+	return (nni_copyin_size(NULL, v, sz, 0, NNI_MAXSZ, t));
+}
+
+static int
+zt_check_orbit(const void *v, size_t sz, nni_type t)
+{
+	NNI_ARG_UNUSED(v);
+	if ((t != NNI_TYPE_UINT64) && (t != NNI_TYPE_OPAQUE)) {
+		return (NNG_EBADTYPE);
+	}
+	if (sz != sizeof(uint64_t) && sz != sizeof(uint64_t) * 2) {
+		return (NNG_EINVAL);
+	}
+	return (0);
+}
+
+static int
+zt_check_deorbit(const void *v, size_t sz, nni_type t)
+{
+	return (nni_copyin_u64(NULL, v, sz, t));
+}
+
+static int
+zt_check_string(const void *v, size_t sz, nni_type t)
+{
+	size_t len;
+
+	if ((t != NNI_TYPE_OPAQUE) && (t != NNI_TYPE_STRING)) {
+		return (NNG_EBADTYPE);
+	}
+	len = nni_strnlen(v, sz);
+	if ((len >= sz) || (len >= NNG_MAXADDRLEN)) {
+		return (NNG_EINVAL);
+	}
+	return (0);
+}
+
+static int
+zt_check_time(const void *v, size_t sz, nni_type t)
+{
+	return (nni_copyin_ms(NULL, v, sz, t));
+}
+
+static int
+zt_check_tries(const void *v, size_t sz, nni_type t)
+{
+	return (nni_copyin_int(NULL, v, sz, 0, 1000000, t));
+}
+
+static nni_chkoption zt_tran_check_opts[] = {
+	{
+	    .o_name  = NNG_OPT_RECVMAXSZ,
+	    .o_check = zt_check_recvmaxsz,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_HOME,
+	    .o_check = zt_check_string,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_ORBIT,
+	    .o_check = zt_check_orbit,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_DEORBIT,
+	    .o_check = zt_check_deorbit,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_CONN_TIME,
+	    .o_check = zt_check_time,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_PING_TIME,
+	    .o_check = zt_check_time,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_PING_TRIES,
+	    .o_check = zt_check_tries,
+	},
+	{
+	    .o_name  = NNG_OPT_ZT_CONN_TRIES,
+	    .o_check = zt_check_tries,
+	},
+	{
+	    .o_name = NULL,
+	},
+};
+
+static int
+zt_tran_checkopt(const char *name, const void *buf, size_t sz, nni_type t)
+{
+	int rv;
+	rv = nni_chkopt(zt_tran_check_opts, name, buf, sz, t);
+	return (rv);
+}
+
 static void
 zt_pipe_close(void *arg)
 {
@@ -1641,13 +1741,13 @@ zt_pipe_fini(void *arg)
 	zt_pipe *p   = arg;
 	zt_node *ztn = p->zp_ztn;
 
-	nni_aio_fini(p->zp_ping_aio);
+	nni_aio_free(p->zp_ping_aio);
 
 	// This tosses the connection details and all state.
 	nni_mtx_lock(&zt_lk);
-	nni_idhash_remove(ztn->zn_ports, p->zp_laddr & zt_port_mask);
-	nni_idhash_remove(ztn->zn_lpipes, p->zp_laddr);
-	nni_idhash_remove(ztn->zn_rpipes, p->zp_raddr);
+	zt_hash_remove(ztn->zn_ports, p->zp_laddr & zt_port_mask);
+	zt_hash_remove(ztn->zn_lpipes, p->zp_laddr);
+	zt_hash_remove(ztn->zn_rpipes, p->zp_raddr);
 	nni_mtx_unlock(&zt_lk);
 
 	for (int i = 0; i < zt_recvq; i++) {
@@ -1674,7 +1774,7 @@ zt_pipe_alloc(
 	zt_node *ztn = ep->ze_ztn;
 	int      i;
 	size_t   maxfrag;
-	size_t   maxfrags;
+	size_t   maxfrags = 0;
 
 	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
 		return (NNG_ENOMEM);
@@ -1698,13 +1798,13 @@ zt_pipe_alloc(
 
 	if (listener) {
 		// listener
-		rv = nni_idhash_insert(ztn->zn_rpipes, raddr, p);
+		rv = zt_hash_insert(ztn->zn_rpipes, raddr, p);
 	} else {
 		// dialer
-		rv = nni_idhash_insert(ztn->zn_lpipes, laddr, p);
+		rv = zt_hash_insert(ztn->zn_lpipes, laddr, p);
 	}
 	if ((rv != 0) ||
-	    ((rv = nni_aio_init(&p->zp_ping_aio, zt_pipe_ping_cb, p)) != 0)) {
+	    ((rv = nni_aio_alloc(&p->zp_ping_aio, zt_pipe_ping_cb, p)) != 0)) {
 		zt_pipe_reap(p);
 		return (rv);
 	}
@@ -1717,7 +1817,13 @@ zt_pipe_alloc(
 
 	// The largest fragment count we can accept on this pipe.
 	// This is rounded up to account for alignment.
-	maxfrags = (p->zp_rcvmax + (maxfrag - 1)) / maxfrag;
+	if (p->zp_rcvmax > 0) {
+		maxfrags = (p->zp_rcvmax + (maxfrag - 1)) / maxfrag;
+	}
+
+	if ((maxfrags > 0xffff) || (maxfrags == 0)) {
+		maxfrags = 0xffff;
+	}
 
 	for (i = 0; i < zt_recvq; i++) {
 		zt_fraglist *fl  = &p->zp_recvq[i];
@@ -2037,7 +2143,7 @@ zt_pipe_ping_cb(void *arg)
 		nni_mtx_unlock(&zt_lk);
 		return;
 	}
-	if (p->zp_ping_try >= p->zp_ping_tries) {
+	if (p->zp_ping_try > p->zp_ping_tries) {
 		// Ping count exceeded; the other side is AFK.
 		// Close the pipe, but no need to send a reason to the peer.
 		zt_pipe_close_err(p, NNG_ECLOSED, 0, NULL);
@@ -2071,7 +2177,7 @@ zt_ep_fini(void *arg)
 {
 	zt_ep *ep = arg;
 	nni_aio_stop(ep->ze_creq_aio);
-	nni_aio_fini(ep->ze_creq_aio);
+	nni_aio_free(ep->ze_creq_aio);
 	NNI_FREE_STRUCT(ep);
 }
 
@@ -2147,7 +2253,7 @@ zt_ep_init(void **epp, nni_url *url, nni_sock *sock, nni_dialer *ndialer,
 
 	nni_aio_list_init(&ep->ze_aios);
 
-	rv = nni_aio_init(&ep->ze_creq_aio, zt_ep_conn_req_cb, ep);
+	rv = nni_aio_alloc(&ep->ze_creq_aio, zt_ep_conn_req_cb, ep);
 	if (rv != 0) {
 		zt_ep_fini(ep);
 		return (rv);
@@ -2236,8 +2342,8 @@ zt_ep_close(void *arg)
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
-		nni_idhash_remove(ztn->zn_ports, ep->ze_laddr & zt_port_mask);
-		nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
+		zt_hash_remove(ztn->zn_ports, ep->ze_laddr & zt_port_mask);
+		zt_hash_remove(ztn->zn_eps, ep->ze_laddr);
 	}
 
 	nni_mtx_unlock(&zt_lk);
@@ -2268,7 +2374,7 @@ zt_ep_bind_locked(zt_ep *ep)
 
 	if ((ep->ze_laddr & zt_port_mask) == 0) {
 		// ask for an ephemeral port
-		if ((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) {
+		if ((rv = zt_hash_alloc(ztn->zn_ports, &port, ep)) != 0) {
 			return (rv);
 		}
 		NNI_ASSERT(port & zt_ephemeral);
@@ -2277,10 +2383,10 @@ zt_ep_bind_locked(zt_ep *ep)
 		// make sure port requested is free.
 		port = ep->ze_laddr & zt_port_mask;
 
-		if (nni_idhash_find(ztn->zn_ports, port, &conflict) == 0) {
+		if (zt_hash_find(ztn->zn_ports, port, &conflict) == 0) {
 			return (NNG_EADDRINUSE);
 		}
-		if ((rv = nni_idhash_insert(ztn->zn_ports, port, ep)) != 0) {
+		if ((rv = zt_hash_insert(ztn->zn_ports, port, ep)) != 0) {
 			return (rv);
 		}
 	}
@@ -2292,8 +2398,8 @@ zt_ep_bind_locked(zt_ep *ep)
 	ep->ze_laddr |= port;
 	ep->ze_running = true;
 
-	if ((rv = nni_idhash_insert(ztn->zn_eps, ep->ze_laddr, ep)) != 0) {
-		nni_idhash_remove(ztn->zn_ports, port);
+	if ((rv = zt_hash_insert(ztn->zn_eps, ep->ze_laddr, ep)) != 0) {
+		zt_hash_remove(ztn->zn_ports, port);
 		return (rv);
 	}
 
@@ -2562,21 +2668,6 @@ zt_ep_get_recvmaxsz(void *arg, void *data, size_t *szp, nni_type t)
 }
 
 static int
-zt_check_string(const void *data, size_t sz, nni_type t)
-{
-	size_t len;
-
-	if ((t != NNI_TYPE_OPAQUE) && (t != NNI_TYPE_STRING)) {
-		return (NNG_EBADTYPE);
-	}
-	len = nni_strnlen(data, sz);
-	if ((len >= sz) || (len >= NNG_MAXADDRLEN)) {
-		return (NNG_EINVAL);
-	}
-	return (0);
-}
-
-static int
 zt_ep_set_home(void *arg, const void *data, size_t sz, nni_type t)
 {
 	int    rv;
@@ -2696,7 +2787,7 @@ zt_ep_set_add_local_addr(void *arg, const void *data, size_t sz, nni_type t)
 
 	if ((rv = nni_copyin_sockaddr(&sa, data, sz, t)) == 0) {
 		enum ZT_ResultCode      zrv;
-		ZT_Node *               zn;
+		zt_node *               ztn;
 		struct sockaddr_storage ss;
 		struct sockaddr_in *    sin;
 		struct sockaddr_in6 *   sin6;
@@ -2727,8 +2818,8 @@ zt_ep_set_add_local_addr(void *arg, const void *data, size_t sz, nni_type t)
 			nni_mtx_unlock(&zt_lk);
 			return (rv);
 		}
-		zn  = ep->ze_ztn;
-		zrv = ZT_Node_addLocalInterfaceAddress(zn, &ss);
+		ztn = ep->ze_ztn;
+		zrv = ZT_Node_addLocalInterfaceAddress(ztn->zn_znode, &ss);
 		nni_mtx_unlock(&zt_lk);
 		rv = zt_result(zrv);
 	}
@@ -3197,6 +3288,7 @@ static struct nni_tran zt_tran = {
 	.tran_pipe     = &zt_pipe_ops,
 	.tran_init     = zt_tran_init,
 	.tran_fini     = zt_tran_fini,
+	.tran_checkopt = zt_tran_checkopt,
 };
 
 int

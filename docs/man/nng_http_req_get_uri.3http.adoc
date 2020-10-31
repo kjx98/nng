@@ -1,4 +1,4 @@
-= nng_http_req_get_method(3http)
+= nng_http_req_get_uri(3http)
 //
 // Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
@@ -42,6 +42,6 @@ None.
 == SEE ALSO
 
 [.text-left]
-<<nng_http_req_alloc.3http#,nng_http_req_alloc(3http)>>,
-<<nng_http_req_set_uri.3http#,nng_http_req_set_uri(3http)>>,
-<<nng.7#,nng(7)>>
+xref:nng_http_req_alloc.3http.adoc[nng_http_req_alloc(3http)],
+xref:nng_http_req_set_uri.3http.adoc[nng_http_req_set_uri(3http)],
+xref:nng.7.adoc[nng(7)]

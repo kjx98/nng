@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -50,8 +50,8 @@ struct nni_dialer {
 	nni_mtx             d_mtx;
 	nni_list            d_pipes;
 	nni_aio *           d_user_aio;
-	nni_aio *           d_con_aio;
-	nni_aio *           d_tmo_aio;  // backoff timer
+	nni_aio             d_con_aio;
+	nni_aio             d_tmo_aio;  // backoff timer
 	nni_duration        d_maxrtime; // maximum time for reconnect
 	nni_duration        d_currtime; // current time for reconnect
 	nni_duration        d_inirtime; // initial time for reconnect
@@ -91,8 +91,8 @@ struct nni_listener {
 	bool                  l_closing; // close started (shutdown)
 	nni_atomic_flag       l_started;
 	nni_list              l_pipes;
-	nni_aio *             l_acc_aio;
-	nni_aio *             l_tmo_aio;
+	nni_aio               l_acc_aio;
+	nni_aio               l_tmo_aio;
 	nni_reap_item         l_reap;
 	nni_listener_stats    l_stats;
 };
@@ -113,6 +113,7 @@ struct nni_pipe {
 	uint32_t           p_id;
 	nni_tran_pipe_ops  p_tran_ops;
 	nni_proto_pipe_ops p_proto_ops;
+	size_t             p_size;
 	void *             p_tran_data;
 	void *             p_proto_data;
 	nni_list_node      p_sock_node;

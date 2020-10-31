@@ -34,7 +34,7 @@ simple lock and unlock operations, and are not recursive.
 Every effort has been made to use light-weight underlying primitives when available.
 
 Mutex (mutual exclusion) objects can be thought of as binary semaphores,
-where only a single thread of execution is permitted to "`own`" the semaphore.
+where only a single thread of execution is permitted to acquire the semaphore.
 
 Furthermore, a mutex can only be unlocked by the thread that locked it.
 
@@ -50,9 +50,9 @@ This function returns 0 on success, and non-zero otherwise.
 == SEE ALSO
 
 [.text-left]
-<<nng_cv_alloc.3supp#,nng_cv_alloc(3supp)>>,
-<<nng_mtx_free.3supp#,nng_mtx_free(3supp)>>,
-<<nng_mtx_lock.3supp#,nng_mtx_lock(3supp)>>,
-<<nng_mtx_unlock.3supp#,nng_mtx_unlock(3supp)>>,
-<<nng_strerror.3#,nng_strerror(3)>>,
-<<nng.7#,nng(7)>>
+xref:nng_cv_alloc.3supp.adoc[nng_cv_alloc(3supp)],
+xref:nng_mtx_free.3supp.adoc[nng_mtx_free(3supp)],
+xref:nng_mtx_lock.3supp.adoc[nng_mtx_lock(3supp)],
+xref:nng_mtx_unlock.3supp.adoc[nng_mtx_unlock(3supp)],
+xref:nng_strerror.3.adoc[nng_strerror(3)],
+xref:nng.7.adoc[nng(7)]

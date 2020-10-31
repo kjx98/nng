@@ -27,7 +27,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <time.h>
 
 #include <nng/nng.h>
@@ -175,7 +174,7 @@ client(const char *url, const char *msecstr)
 		fatal("nng_req0_open", rv);
 	}
 
-	if ((rv = nng_dial(sock, url, NULL, 0)) < 0) {
+	if ((rv = nng_dial(sock, url, NULL, 0)) != 0) {
 		fatal("nng_dial", rv);
 	}
 

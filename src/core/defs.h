@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitoar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -16,14 +16,14 @@
 // C compilers may get unhappy when named arguments are not used.  While
 // there are things like __attribute__((unused)) which are arguably
 // superior, support for such are not universal.
-#define NNI_ARG_UNUSED(x) ((void) x);
+#define NNI_ARG_UNUSED(x) ((void) x)
 
 #ifndef NDEBUG
 #define NNI_ASSERT(x) \
 	if (!(x))     \
 	nni_panic("%s: %d: assert err: %s", __FILE__, __LINE__, #x)
 #else
-#define NNI_ASSERT(x)
+#define NNI_ASSERT(x) (0)
 #endif
 
 // Returns the size of an array in elements. (Convenience.)
@@ -85,54 +85,60 @@ typedef struct {
 #define NNI_ALLOC_STRUCTS(s, n) nni_zalloc(sizeof(*s) * n)
 #define NNI_FREE_STRUCTS(s, n) nni_free(s, sizeof(*s) * n)
 
-#define NNI_PUT16(ptr, u)                                   \
-	do {                                                \
-		(ptr)[0] = (uint8_t)(((uint16_t)(u)) >> 8); \
-		(ptr)[1] = (uint8_t)((uint16_t)(u));        \
-	} while (0)
-
-#define NNI_PUT32(ptr, u)                                    \
+#define NNI_PUT16(ptr, u)                                    \
 	do {                                                 \
-		(ptr)[0] = (uint8_t)(((uint32_t)(u)) >> 24); \
-		(ptr)[1] = (uint8_t)(((uint32_t)(u)) >> 16); \
-		(ptr)[2] = (uint8_t)(((uint32_t)(u)) >> 8);  \
-		(ptr)[3] = (uint8_t)((uint32_t)(u));         \
+		(ptr)[0] = (uint8_t)(((uint16_t)(u)) >> 8u); \
+		(ptr)[1] = (uint8_t)((uint16_t)(u));         \
 	} while (0)
 
-#define NNI_PUT64(ptr, u)                                    \
-	do {                                                 \
-		(ptr)[0] = (uint8_t)(((uint64_t)(u)) >> 56); \
-		(ptr)[1] = (uint8_t)(((uint64_t)(u)) >> 48); \
-		(ptr)[2] = (uint8_t)(((uint64_t)(u)) >> 40); \
-		(ptr)[3] = (uint8_t)(((uint64_t)(u)) >> 32); \
-		(ptr)[4] = (uint8_t)(((uint64_t)(u)) >> 24); \
-		(ptr)[5] = (uint8_t)(((uint64_t)(u)) >> 16); \
-		(ptr)[6] = (uint8_t)(((uint64_t)(u)) >> 8);  \
-		(ptr)[7] = (uint8_t)((uint64_t)(u));         \
+#define NNI_PUT32(ptr, u)                                     \
+	do {                                                  \
+		(ptr)[0] = (uint8_t)(((uint32_t)(u)) >> 24u); \
+		(ptr)[1] = (uint8_t)(((uint32_t)(u)) >> 16u); \
+		(ptr)[2] = (uint8_t)(((uint32_t)(u)) >> 8u);  \
+		(ptr)[3] = (uint8_t)((uint32_t)(u));          \
 	} while (0)
 
-#define NNI_GET16(ptr, v)                            \
-	v = (((uint16_t)((uint8_t)(ptr)[0])) << 8) + \
+#define NNI_PUT64(ptr, u)                                     \
+	do {                                                  \
+		(ptr)[0] = (uint8_t)(((uint64_t)(u)) >> 56u); \
+		(ptr)[1] = (uint8_t)(((uint64_t)(u)) >> 48u); \
+		(ptr)[2] = (uint8_t)(((uint64_t)(u)) >> 40u); \
+		(ptr)[3] = (uint8_t)(((uint64_t)(u)) >> 32u); \
+		(ptr)[4] = (uint8_t)(((uint64_t)(u)) >> 24u); \
+		(ptr)[5] = (uint8_t)(((uint64_t)(u)) >> 16u); \
+		(ptr)[6] = (uint8_t)(((uint64_t)(u)) >> 8u);  \
+		(ptr)[7] = (uint8_t)((uint64_t)(u));          \
+	} while (0)
+
+#define NNI_GET16(ptr, v)                             \
+	v = (((uint16_t)((uint8_t)(ptr)[0])) << 8u) + \
 	    (((uint16_t)(uint8_t)(ptr)[1]))
 
-#define NNI_GET32(ptr, v)                             \
-	v = (((uint32_t)((uint8_t)(ptr)[0])) << 24) + \
-	    (((uint32_t)((uint8_t)(ptr)[1])) << 16) + \
-	    (((uint32_t)((uint8_t)(ptr)[2])) << 8) +  \
+#define NNI_GET32(ptr, v)                              \
+	v = (((uint32_t)((uint8_t)(ptr)[0])) << 24u) + \
+	    (((uint32_t)((uint8_t)(ptr)[1])) << 16u) + \
+	    (((uint32_t)((uint8_t)(ptr)[2])) << 8u) +  \
 	    (((uint32_t)(uint8_t)(ptr)[3]))
 
-#define NNI_GET64(ptr, v)                             \
-	v = (((uint64_t)((uint8_t)(ptr)[0])) << 56) + \
-	    (((uint64_t)((uint8_t)(ptr)[1])) << 48) + \
-	    (((uint64_t)((uint8_t)(ptr)[2])) << 40) + \
-	    (((uint64_t)((uint8_t)(ptr)[3])) << 32) + \
-	    (((uint64_t)((uint8_t)(ptr)[4])) << 24) + \
-	    (((uint64_t)((uint8_t)(ptr)[5])) << 16) + \
-	    (((uint64_t)((uint8_t)(ptr)[6])) << 8) +  \
+#define NNI_GET64(ptr, v)                              \
+	v = (((uint64_t)((uint8_t)(ptr)[0])) << 56u) + \
+	    (((uint64_t)((uint8_t)(ptr)[1])) << 48u) + \
+	    (((uint64_t)((uint8_t)(ptr)[2])) << 40u) + \
+	    (((uint64_t)((uint8_t)(ptr)[3])) << 32u) + \
+	    (((uint64_t)((uint8_t)(ptr)[4])) << 24u) + \
+	    (((uint64_t)((uint8_t)(ptr)[5])) << 16u) + \
+	    (((uint64_t)((uint8_t)(ptr)[6])) << 8u) +  \
 	    (((uint64_t)(uint8_t)(ptr)[7]))
 
 // This increments a pointer a fixed number of byte cells.
 #define NNI_INCPTR(ptr, n) ((ptr) = (void *) ((char *) (ptr) + (n)))
+
+// Alignment -- this is used when allocating adjacent objects to ensure
+// that each object begins on a natural alignment boundary.
+#define NNI_ALIGN_SIZE sizeof(void *)
+#define NNI_ALIGN_MASK (NNI_ALIGN_SIZE - 1)
+#define NNI_ALIGN_UP(sz) (((sz) + NNI_ALIGN_MASK) & ~NNI_ALIGN_MASK)
 
 // A few assorted other items.
 #define NNI_FLAG_IPV4ONLY 1
@@ -154,5 +160,19 @@ typedef enum {
 } nni_type;
 
 typedef nni_type nni_opt_type;
+
+// NNI_MAX_MAX_TTL is the maximum value that MAX_TTL can be set to -
+// i.e. the number of nng_device boundaries that a message can traverse.
+// This value drives the size of pre-allocated headers and back-trace
+// buffers -- we need 4 bytes for each hop, plus 4 bytes for the request
+// identifier.  Thus, it is recommended not to set this value too large.
+// (It is possible to scale out to inconceivably large networks with
+// only a few hops - we have yet to see more than 4 in practice.)
+#ifndef NNI_MAX_MAX_TTL
+#define NNI_MAX_MAX_TTL 15
+#endif
+
+// NNI_MAX_HEADER_SIZE is our header size.
+#define NNI_MAX_HEADER_SIZE ((NNI_MAX_MAX_TTL + 1) * sizeof(uint32_t))
 
 #endif // CORE_DEFS_H

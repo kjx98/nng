@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -36,7 +36,7 @@ typedef struct resolv_item resolv_item;
 struct resolv_item {
 	int          family;
 	int          passive;
-	const char * name;
+	char *       name;
 	int          proto;
 	int          socktype;
 	uint16_t     port;
@@ -60,6 +60,7 @@ resolv_cancel(nni_aio *aio, void *arg, int rv)
 		// so we can just discard everything.
 		nni_aio_list_remove(aio);
 		nni_mtx_unlock(&resolv_mtx);
+		nni_strfree(item->name);
 		NNI_FREE_STRUCT(item);
 	} else {
 		// Resolver still working, so just unlink our AIO to
@@ -153,6 +154,7 @@ resolv_task(resolv_item *item)
 			sin6               = (void *) probe->ai_addr;
 			sa.s_in6.sa_family = NNG_AF_INET6;
 			sa.s_in6.sa_port   = item->port;
+			sa.s_in6.sa_scope  = sin6->sin6_scope_id;
 			memcpy(sa.s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
 			nni_aio_set_sockaddr(item->aio, &sa);
 			break;
@@ -225,9 +227,16 @@ resolv_ip(const char *host, const char *serv, int passive, int family,
 		nni_aio_finish_error(aio, NNG_ENOMEM);
 		return;
 	}
+	if (host == NULL) {
+		item->name = NULL;
+	} else if ((item->name = nni_strdup(host)) == NULL) {
+		nni_aio_finish_error(aio, NNG_ENOMEM);
+		NNI_FREE_STRUCT(item);
+		return;
+	}
+
 	memset(&item->sa, 0, sizeof(item->sa));
 	item->passive  = passive;
-	item->name     = host;
 	item->proto    = proto;
 	item->aio      = aio;
 	item->family   = fam;
@@ -243,6 +252,7 @@ resolv_ip(const char *host, const char *serv, int passive, int family,
 	}
 	if (rv != 0) {
 		nni_mtx_unlock(&resolv_mtx);
+		nni_strfree(item->name);
 		NNI_FREE_STRUCT(item);
 		nni_aio_finish_error(aio, rv);
 		return;
@@ -300,52 +310,113 @@ resolv_worker(void *notused)
 			item->aio = NULL;
 
 			nni_aio_finish(aio, rv, 0);
-
-			NNI_FREE_STRUCT(item);
 		}
+		nni_strfree(item->name);
+		NNI_FREE_STRUCT(item);
 	}
 	nni_mtx_unlock(&resolv_mtx);
 }
 
 int
-nni_ntop(const nni_sockaddr *sa, char *ipstr, char *portstr)
+parse_ip(const char *addr, nng_sockaddr *sa, bool want_port)
 {
-	void *   ap;
-	uint16_t port;
-	int      af;
-	switch (sa->s_family) {
-	case NNG_AF_INET:
-		ap   = (void *) &sa->s_in.sa_addr;
-		port = sa->s_in.sa_port;
-		af   = AF_INET;
-		break;
-	case NNG_AF_INET6:
-		ap   = (void *) &sa->s_in6.sa_addr;
-		port = sa->s_in6.sa_port;
-		af   = AF_INET6;
-		break;
-	default:
-		return (NNG_EINVAL);
+	struct addrinfo  hints;
+	struct addrinfo *results;
+	int              rv;
+	bool             v6      = false;
+	bool             wrapped = false;
+	char *           port;
+	char *           host;
+	char *           buf;
+	size_t           buf_len;
+
+	if (addr == NULL) {
+		addr = "";
 	}
-	if (ipstr != NULL) {
-		if (af == AF_INET6) {
-			size_t l;
-			ipstr[0] = '[';
-			InetNtopA(af, ap, ipstr + 1, INET6_ADDRSTRLEN);
-			l          = strlen(ipstr);
-			ipstr[l++] = ']';
-			ipstr[l++] = '\0';
-		} else {
-			InetNtopA(af, ap, ipstr, INET6_ADDRSTRLEN);
+
+	buf_len = strlen(addr) + 1;
+	if ((buf = nni_alloc(buf_len)) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	memcpy(buf, addr, buf_len);
+	host = buf;
+	if (*host == '[') {
+		v6      = true;
+		wrapped = true;
+		host++;
+	} else {
+		char *s;
+		for (s = host; *s != '\0'; s++) {
+			if (*s == '.') {
+				break;
+			}
+			if (*s == ':') {
+				v6 = true;
+				break;
+			}
 		}
 	}
-	if (portstr != NULL) {
-#ifdef NNG_LITTLE_ENDIAN
-		port = ((port >> 8) & 0xff) | ((port & 0xff) << 8);
-#endif
-		snprintf(portstr, 6, "%u", port);
+	for (port = host; *port != '\0'; port++) {
+		if (wrapped) {
+			if (*port == ']') {
+				*port++ = '\0';
+				wrapped = false;
+				break;
+			}
+		} else if (!v6) {
+			if (*port == ':') {
+				break;
+			}
+		}
 	}
-	return (0);
+
+	if (wrapped) {
+		// Never got the closing bracket.
+		rv = NNG_EADDRINVAL;
+		goto done;
+	}
+
+	if ((!want_port) && (*port != '\0')) {
+		rv = NNG_EADDRINVAL;
+		goto done;
+	} else if (*port == ':') {
+		*port++ = '\0';
+	}
+
+	if (*port == '\0') {
+		port = "0";
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_flags =
+	    AI_ADDRCONFIG | AI_NUMERICSERV | AI_NUMERICHOST | AI_PASSIVE;
+	if (v6) {
+		hints.ai_family = AF_INET6;
+	}
+
+	rv = getaddrinfo(host, port, &hints, &results);
+	if ((rv != 0) || (results == NULL)) {
+		rv = nni_win_error(rv);
+		goto done;
+	}
+	nni_win_sockaddr2nn(sa, (void *) results->ai_addr);
+	freeaddrinfo(results);
+
+done:
+	nni_free(buf, buf_len);
+	return (rv);
+}
+
+int
+nni_parse_ip(const char *addr, nni_sockaddr *sa)
+{
+	return (parse_ip(addr, sa, false));
+}
+
+int
+nni_parse_ip_port(const char *addr, nni_sockaddr *sa)
+{
+	return (parse_ip(addr, sa, true));
 }
 
 int
@@ -362,6 +433,7 @@ nni_win_resolv_sysinit(void)
 			nni_win_resolv_sysfini();
 			return (rv);
 		}
+		nni_thr_set_name(&resolv_thrs[i], "nng:resolver");
 	}
 	for (int i = 0; i < NNG_RESOLV_CONCURRENCY; i++) {
 		nni_thr_run(&resolv_thrs[i]);

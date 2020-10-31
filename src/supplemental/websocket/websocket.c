@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -28,7 +28,7 @@ typedef int (*nni_ws_listen_hook)(void *, nng_http_req *, nng_http_res *);
 // We have chosen to be a bit more stringent in the size of the frames that
 // we send, while we more generously allow larger incoming frames.  These
 // may be tuned by options.
-#define WS_DEF_RECVMAX (1U << 20)    // 1MB Message limit (message mode only)
+#define WS_DEF_RECVMAX (1U << 20) // 1MB Message limit (message mode only)
 #define WS_DEF_MAXRXFRAME (1U << 20) // 1MB Frame size (recv)
 #define WS_DEF_MAXTXFRAME (1U << 16) // 64KB Frame size (send)
 
@@ -54,6 +54,8 @@ struct nni_ws {
 	bool             wclose;
 	bool             isstream;
 	bool             inmsg;
+	bool             send_text;
+	bool             recv_text;
 	nni_mtx          mtx;
 	nni_list         sendq;
 	nni_list         recvq;
@@ -92,6 +94,8 @@ struct nni_ws_listener {
 	bool                started;
 	bool                closed;
 	bool                isstream;
+	bool                send_text;
+	bool                recv_text;
 	nni_http_handler *  handler;
 	nni_ws_listen_hook  hookfn;
 	void *              hookarg;
@@ -119,6 +123,8 @@ struct nni_ws_dialer {
 	nni_list          wspend; // ws structures still negotiating
 	bool              closed;
 	bool              isstream;
+	bool              send_text;
+	bool              recv_text;
 	nni_list          headers; // request headers
 	size_t            maxframe;
 	size_t            fragsize;
@@ -156,7 +162,8 @@ struct ws_frame {
 	enum ws_type  op;
 	bool          final;
 	bool          masked;
-	size_t        bufsz; // allocated size
+	size_t        asize; // allocated size
+	uint8_t *     adata;
 	uint8_t *     buf;
 	nng_aio *     aio;
 };
@@ -341,8 +348,8 @@ ws_make_accept(const char *key, char *accept)
 static void
 ws_frame_fini(ws_frame *frame)
 {
-	if (frame->bufsz != 0) {
-		nni_free(frame->buf, frame->bufsz);
+	if (frame->asize != 0) {
+		nni_free(frame->adata, frame->asize);
 	}
 	NNI_FREE_STRUCT(frame);
 }
@@ -403,7 +410,7 @@ ws_msg_init_control(
 	frame->head[1] = len & 0x7F;
 	frame->hlen    = 2;
 	frame->buf     = frame->sdata;
-	frame->bufsz   = 0;
+	frame->asize   = 0;
 
 	if (ws->server) {
 		frame->masked = false;
@@ -446,11 +453,15 @@ ws_frame_prep_tx(nni_ws *ws, ws_frame *frame)
 	}
 	// Potentially allocate space for the data if we need to.
 	// Note that an empty message is legal.
-	if ((frame->bufsz < frame->len) && (frame->len > 0)) {
-		frame->buf = nni_alloc(frame->len);
-		if (frame->buf == NULL) {
+	if ((frame->asize < frame->len) && (frame->len > 0)) {
+		nni_free(frame->adata, frame->asize);
+		frame->adata = nni_alloc(frame->len);
+		if (frame->adata == NULL) {
+			frame->asize = 0;
 			return (NNG_ENOMEM);
 		}
+		frame->asize = frame->len;
+		frame->buf   = frame->adata;
 	}
 	buf = frame->buf;
 
@@ -469,7 +480,11 @@ ws_frame_prep_tx(nni_ws *ws, ws_frame *frame)
 
 	if (nni_aio_count(aio) == 0) {
 		// This is the first frame.
-		frame->op = WS_BINARY;
+		if (ws->send_text) {
+			frame->op = WS_TEXT;
+		} else {
+			frame->op = WS_BINARY;
+		}
 	} else {
 		frame->op = WS_CONT;
 	}
@@ -843,12 +858,14 @@ ws_read_finish_str(nni_ws *ws)
 				// This eats the entire iov.
 				n = iov->iov_len;
 			}
-			memcpy(iov->iov_buf, frame->buf, n);
-			iov->iov_buf = ((uint8_t *) iov->iov_buf) + n;
-			iov->iov_len -= n;
-			if (iov->iov_len == 0) {
-				iov++;
-				niov--;
+			if (n != 0) {
+				memcpy(iov->iov_buf, frame->buf, n);
+				iov->iov_buf = ((uint8_t *) iov->iov_buf) + n;
+				iov->iov_len -= n;
+				if (iov->iov_len == 0) {
+					iov++;
+					niov--;
+				}
 			}
 
 			if (frame->len == n) {
@@ -937,6 +954,12 @@ ws_read_frame_cb(nni_ws *ws, ws_frame *frame)
 		ws->rxframe = NULL;
 		nni_list_append(&ws->rxq, frame);
 		break;
+	case WS_TEXT:
+		if (!ws->recv_text) {
+			// No support for text mode at present.
+			ws_close(ws, WS_CLOSE_UNSUPP_FORMAT);
+		}
+		// FALLTHROUGH
 	case WS_BINARY:
 		if (ws->inmsg) {
 			ws_close(ws, WS_CLOSE_PROTOCOL_ERR);
@@ -948,10 +971,6 @@ ws_read_frame_cb(nni_ws *ws, ws_frame *frame)
 		ws->rxframe = NULL;
 		nni_list_append(&ws->rxq, frame);
 		break;
-	case WS_TEXT:
-		// No support for text mode at present.
-		ws_close(ws, WS_CLOSE_UNSUPP_FORMAT);
-		return;
 
 	case WS_PING:
 		if (frame->len > 125) {
@@ -1005,15 +1024,15 @@ ws_read_cb(void *arg)
 
 	if (frame->hlen == 0) {
 		frame->hlen   = 2;
-		frame->op     = frame->head[0] & 0x7f;
-		frame->final  = (frame->head[0] & 0x80) ? 1 : 0;
-		frame->masked = (frame->head[1] & 0x80) ? 1 : 0;
+		frame->op     = frame->head[0] & 0x7fu;
+		frame->final  = (frame->head[0] & 0x80u) ? 1 : 0;
+		frame->masked = (frame->head[1] & 0x80u) ? 1 : 0;
 		if (frame->masked) {
 			frame->hlen += 4;
 		}
-		if ((frame->head[1] & 0x7F) == 127) {
+		if ((frame->head[1] & 0x7Fu) == 127) {
 			frame->hlen += 8;
-		} else if ((frame->head[1] & 0x7F) == 126) {
+		} else if ((frame->head[1] & 0x7Fu) == 126) {
 			frame->hlen += 2;
 		}
 
@@ -1040,7 +1059,7 @@ ws_read_cb(void *arg)
 	if (frame->buf == NULL) {
 
 		// Determine expected frame size.
-		switch ((frame->len = (frame->head[1] & 0x7F))) {
+		switch ((frame->len = (frame->head[1] & 0x7Fu))) {
 		case 127:
 			NNI_GET64(frame->head + 2, frame->len);
 			if (frame->len < 65536) {
@@ -1104,15 +1123,16 @@ ws_read_cb(void *arg)
 			// Short frames can avoid an alloc
 			if (frame->len < 126) {
 				frame->buf   = frame->sdata;
-				frame->bufsz = 0;
+				frame->asize = 0;
 			} else {
-				frame->buf = nni_alloc(frame->len);
-				if (frame->buf == NULL) {
+				frame->adata = nni_alloc(frame->len);
+				if (frame->adata == NULL) {
 					ws_close(ws, WS_CLOSE_INTERNAL);
 					nni_mtx_unlock(&ws->mtx);
 					return;
 				}
-				frame->bufsz = frame->len;
+				frame->asize = frame->len;
+				frame->buf   = frame->adata;
 			}
 
 			iov.iov_buf = frame->buf;
@@ -1222,11 +1242,11 @@ ws_fini(void *arg)
 
 	nni_strfree(ws->reqhdrs);
 	nni_strfree(ws->reshdrs);
-	nni_aio_fini(ws->rxaio);
-	nni_aio_fini(ws->txaio);
-	nni_aio_fini(ws->closeaio);
-	nni_aio_fini(ws->httpaio);
-	nni_aio_fini(ws->connaio);
+	nni_aio_free(ws->rxaio);
+	nni_aio_free(ws->txaio);
+	nni_aio_free(ws->closeaio);
+	nni_aio_free(ws->httpaio);
+	nni_aio_free(ws->connaio);
 	nni_mtx_fini(&ws->mtx);
 	NNI_FREE_STRUCT(ws);
 }
@@ -1403,11 +1423,11 @@ ws_init(nni_ws **wsp)
 	nni_aio_list_init(&ws->sendq);
 	nni_aio_list_init(&ws->recvq);
 
-	if (((rv = nni_aio_init(&ws->closeaio, ws_close_cb, ws)) != 0) ||
-	    ((rv = nni_aio_init(&ws->txaio, ws_write_cb, ws)) != 0) ||
-	    ((rv = nni_aio_init(&ws->rxaio, ws_read_cb, ws)) != 0) ||
-	    ((rv = nni_aio_init(&ws->httpaio, ws_http_cb, ws)) != 0) ||
-	    ((rv = nni_aio_init(&ws->connaio, ws_conn_cb, ws)) != 0)) {
+	if (((rv = nni_aio_alloc(&ws->closeaio, ws_close_cb, ws)) != 0) ||
+	    ((rv = nni_aio_alloc(&ws->txaio, ws_write_cb, ws)) != 0) ||
+	    ((rv = nni_aio_alloc(&ws->rxaio, ws_read_cb, ws)) != 0) ||
+	    ((rv = nni_aio_alloc(&ws->httpaio, ws_http_cb, ws)) != 0) ||
+	    ((rv = nni_aio_alloc(&ws->connaio, ws_conn_cb, ws)) != 0)) {
 		ws_fini(ws);
 		return (rv);
 	}
@@ -1443,6 +1463,7 @@ ws_listener_free(void *arg)
 
 	if (l->handler != NULL) {
 		nni_http_handler_fini(l->handler);
+		l->handler = NULL;
 	}
 	if (l->server != NULL) {
 		nni_http_server_fini(l->server);
@@ -1615,14 +1636,16 @@ ws_handler(nni_aio *aio)
 		status = NNG_HTTP_STATUS_INTERNAL_SERVER_ERROR;
 		goto err;
 	}
-	ws->http     = conn;
-	ws->req      = req;
-	ws->res      = res;
-	ws->server   = true;
-	ws->maxframe = l->maxframe;
-	ws->fragsize = l->fragsize;
-	ws->recvmax  = l->recvmax;
-	ws->isstream = l->isstream;
+	ws->http      = conn;
+	ws->req       = req;
+	ws->res       = res;
+	ws->server    = true;
+	ws->maxframe  = l->maxframe;
+	ws->fragsize  = l->fragsize;
+	ws->recvmax   = l->recvmax;
+	ws->isstream  = l->isstream;
+	ws->recv_text = l->recv_text;
+	ws->send_text = l->send_text;
 
 	nni_list_append(&l->reply, ws);
 	nni_aio_set_data(ws->httpaio, 0, l);
@@ -1898,6 +1921,58 @@ ws_listener_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 }
 
 static int
+ws_listener_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
+{
+	nni_ws_listener *l = arg;
+	int              rv;
+	bool             b;
+
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+		nni_mtx_lock(&l->mtx);
+		l->recv_text = b;
+		nni_mtx_unlock(&l->mtx);
+	}
+	return (rv);
+}
+
+static int
+ws_listener_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
+{
+	nni_ws_listener *l = arg;
+	int              rv;
+	bool             b;
+
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+		nni_mtx_lock(&l->mtx);
+		l->send_text = b;
+		nni_mtx_unlock(&l->mtx);
+	}
+	return (rv);
+}
+
+static int
+ws_listener_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws_listener *l = arg;
+	int              rv;
+	nni_mtx_lock(&l->mtx);
+	rv = nni_copyout_bool(l->recv_text, buf, szp, t);
+	nni_mtx_unlock(&l->mtx);
+	return (rv);
+}
+
+static int
+ws_listener_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws_listener *l = arg;
+	int              rv;
+	nni_mtx_lock(&l->mtx);
+	rv = nni_copyout_bool(l->send_text, buf, szp, t);
+	nni_mtx_unlock(&l->mtx);
+	return (rv);
+}
+
+static int
 ws_listener_get_url(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
@@ -1942,6 +2017,16 @@ static const nni_option ws_listener_options[] = {
 	{
 	    .o_name = NNG_OPT_URL,
 	    .o_get  = ws_listener_get_url,
+	},
+	{
+	    .o_name = NNG_OPT_WS_RECV_TEXT,
+	    .o_set  = ws_listener_set_recv_text,
+	    .o_get  = ws_listener_get_recv_text,
+	},
+	{
+	    .o_name = NNG_OPT_WS_SEND_TEXT,
+	    .o_set  = ws_listener_set_send_text,
+	    .o_get  = ws_listener_get_send_text,
 	},
 	{
 	    .o_name = NULL,
@@ -2236,11 +2321,13 @@ ws_dialer_dial(void *arg, nni_aio *aio)
 		ws_reap(ws);
 		return;
 	}
-	ws->dialer   = d;
-	ws->useraio  = aio;
-	ws->server   = false;
-	ws->maxframe = d->maxframe;
-	ws->isstream = d->isstream;
+	ws->dialer    = d;
+	ws->useraio   = aio;
+	ws->server    = false;
+	ws->maxframe  = d->maxframe;
+	ws->isstream  = d->isstream;
+	ws->recv_text = d->recv_text;
+	ws->send_text = d->send_text;
 	nni_list_append(&d->wspend, ws);
 	nni_http_client_connect(d->client, ws->connaio);
 	nni_mtx_unlock(&d->mtx);
@@ -2256,6 +2343,36 @@ ws_dialer_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
 		nni_mtx_lock(&d->mtx);
 		d->isstream = !b;
+		nni_mtx_unlock(&d->mtx);
+	}
+	return (rv);
+}
+
+static int
+ws_dialer_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
+{
+	nni_ws_dialer *d = arg;
+	int            rv;
+	bool           b;
+
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+		nni_mtx_lock(&d->mtx);
+		d->recv_text = b;
+		nni_mtx_unlock(&d->mtx);
+	}
+	return (rv);
+}
+
+static int
+ws_dialer_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
+{
+	nni_ws_dialer *d = arg;
+	int            rv;
+	bool           b;
+
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+		nni_mtx_lock(&d->mtx);
+		d->send_text = b;
 		nni_mtx_unlock(&d->mtx);
 	}
 	return (rv);
@@ -2379,6 +2496,28 @@ ws_dialer_get_proto(void *arg, void *buf, size_t *szp, nni_type t)
 	return (rv);
 }
 
+static int
+ws_dialer_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws_dialer *d = arg;
+	int            rv;
+	nni_mtx_lock(&d->mtx);
+	rv = nni_copyout_bool(d->recv_text, buf, szp, t);
+	nni_mtx_unlock(&d->mtx);
+	return (rv);
+}
+
+static int
+ws_dialer_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws_dialer *d = arg;
+	int            rv;
+	nni_mtx_lock(&d->mtx);
+	rv = nni_copyout_bool(d->send_text, buf, szp, t);
+	nni_mtx_unlock(&d->mtx);
+	return (rv);
+}
+
 static const nni_option ws_dialer_options[] = {
 	{
 	    .o_name = NNI_OPT_WS_MSGMODE,
@@ -2409,6 +2548,17 @@ static const nni_option ws_dialer_options[] = {
 	    .o_set  = ws_dialer_set_proto,
 	    .o_get  = ws_dialer_get_proto,
 	},
+	{
+	    .o_name = NNG_OPT_WS_RECV_TEXT,
+	    .o_set  = ws_dialer_set_recv_text,
+	    .o_get  = ws_dialer_get_recv_text,
+	},
+	{
+	    .o_name = NNG_OPT_WS_SEND_TEXT,
+	    .o_set  = ws_dialer_set_send_text,
+	    .o_get  = ws_dialer_get_send_text,
+	},
+
 	{
 	    .o_name = NULL,
 	},
@@ -2602,7 +2752,7 @@ ws_str_recv(void *arg, nng_aio *aio)
 	}
 	nni_list_append(&ws->recvq, aio);
 	if (nni_list_first(&ws->recvq) == aio) {
-		ws_read_finish_msg(ws);
+		ws_read_finish(ws);
 	}
 	ws_start_read(ws);
 
@@ -2640,6 +2790,30 @@ ws_get_request_uri(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_str(nni_http_req_get_uri(ws->req), buf, szp, t));
 }
 
+static int
+ws_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws *ws = arg;
+	bool    b;
+	nni_mtx_lock(&ws->mtx);
+	b = ws->recv_text;
+	nni_mtx_unlock(&ws->mtx);
+
+	return (nni_copyout_bool(b, buf, szp, t));
+}
+
+static int
+ws_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws *ws = arg;
+	bool    b;
+	nni_mtx_lock(&ws->mtx);
+	b = ws->send_text;
+	nni_mtx_unlock(&ws->mtx);
+
+	return (nni_copyout_bool(b, buf, szp, t));
+}
+
 static const nni_option ws_options[] = {
 	{
 	    .o_name = NNG_OPT_WS_REQUEST_HEADERS,
@@ -2652,6 +2826,14 @@ static const nni_option ws_options[] = {
 	{
 	    .o_name = NNG_OPT_WS_REQUEST_URI,
 	    .o_get  = ws_get_request_uri,
+	},
+	{
+	    .o_name = NNG_OPT_WS_RECV_TEXT,
+	    .o_get  = ws_get_recv_text,
+	},
+	{
+	    .o_name = NNG_OPT_WS_SEND_TEXT,
+	    .o_get  = ws_get_send_text,
 	},
 	{
 	    .o_name = NULL,
@@ -2744,6 +2926,12 @@ ws_check_size(const void *buf, size_t sz, nni_type t)
 	return (nni_copyin_size(NULL, buf, sz, 0, NNI_MAXSZ, t));
 }
 
+static int
+ws_check_bool(const void *buf, size_t sz, nni_type t)
+{
+	return (nni_copyin_size(NULL, buf, sz, 0, NNI_MAXSZ, t));
+}
+
 static const nni_chkoption ws_chkopts[] = {
 	{
 	    .o_name  = NNG_OPT_WS_SENDMAXFRAME,
@@ -2768,6 +2956,14 @@ static const nni_chkoption ws_chkopts[] = {
 	{
 	    .o_name  = NNG_OPT_WS_RESPONSE_HEADERS,
 	    .o_check = ws_check_string,
+	},
+	{
+	    .o_name  = NNG_OPT_WS_RECV_TEXT,
+	    .o_check = ws_check_bool,
+	},
+	{
+	    .o_name  = NNG_OPT_WS_SEND_TEXT,
+	    .o_check = ws_check_bool,
 	},
 	{
 	    .o_name = NULL,

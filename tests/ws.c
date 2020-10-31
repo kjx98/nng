@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -95,7 +95,7 @@ TestMain("WebSocket Transport", {
 			nng_close(s2);
 			nng_close(s1);
 		});
-		trantest_next_address(addr, "ws://:%u/test");
+		trantest_next_address(addr, "ws4://:%u/test");
 		So(nng_listen(s1, addr, NULL, 0) == 0);
 		nng_msleep(100);
 		// reset port back one
@@ -114,7 +114,7 @@ TestMain("WebSocket Transport", {
 			nng_close(s2);
 			nng_close(s1);
 		});
-		trantest_next_address(addr, "ws://*:%u/test");
+		trantest_next_address(addr, "ws4://*:%u/test");
 		So(nng_listen(s1, addr, NULL, 0) == 0);
 		nng_msleep(100);
 		// reset port back one
@@ -150,8 +150,8 @@ TestMain("WebSocket Transport", {
 			nng_close(s1);
 			nng_close(s2);
 		});
-		So(nng_listen(s1, "ws://*:5599/one", NULL, 0) == 0);
-		So(nng_listen(s1, "ws://*:5599/two", NULL, 0) == 0);
+		So(nng_listen(s1, "ws4://*:5599/one", NULL, 0) == 0);
+		So(nng_listen(s1, "ws4://*:5599/two", NULL, 0) == 0);
 		So(nng_dial(s2, "ws://127.0.0.1:5599/one", NULL, 0) == 0);
 	});
 
@@ -171,7 +171,7 @@ TestMain("WebSocket Transport", {
 		So(nng_listener_getopt_int(
 		       l1, NNG_OPT_TCP_BOUND_PORT, &port) == 0);
 		So(port != 0);
-		snprintf(ws_url, 1023, "ws://*:%d/two", port);
+		snprintf(ws_url, sizeof(ws_url), "ws://*:%d/two", port);
 		So(nng_listen(s2, ws_url, NULL, 0) == 0);
 	});
 

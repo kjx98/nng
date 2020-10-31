@@ -25,7 +25,7 @@ const char * nng_strerror(int err);
 == DESCRIPTION
 
 The `nng_strerror()` returns the human-readable description of the
-given _nng_ error in `err`.
+given error in `err`.
 
 NOTE: The returned error message is provided in US English, but in the
 future locale-specific strings may be presented instead.
@@ -44,5 +44,5 @@ by a `NUL` byte.
 == SEE ALSO
 
 [.text-left]
-<<libnng.3#,libnng(3)>>,
-<<nng.7#,nng(7)>>
+xref:libnng.3.adoc[libnng(3)],
+xref:nng.7.adoc[nng(7)]

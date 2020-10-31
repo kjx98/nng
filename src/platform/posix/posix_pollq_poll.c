@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -61,7 +61,7 @@ struct nni_posix_pfd {
 	nni_list_node    node;
 	nni_cv           cv;
 	nni_mtx          mtx;
-	int              events;
+	unsigned         events;
 	nni_posix_pfd_cb cb;
 	void *           arg;
 };
@@ -164,7 +164,7 @@ nni_posix_pfd_fini(nni_posix_pfd *pfd)
 }
 
 int
-nni_posix_pfd_arm(nni_posix_pfd *pfd, int events)
+nni_posix_pfd_arm(nni_posix_pfd *pfd, unsigned events)
 {
 	nni_posix_pollq *pq = pfd->pq;
 
@@ -191,7 +191,7 @@ nni_posix_poll_thr(void *arg)
 
 	for (;;) {
 		int            nfds;
-		int            events;
+		unsigned       events;
 		nni_posix_pfd *pfd;
 
 		nni_mtx_lock(&pq->mtx);
@@ -329,6 +329,7 @@ nni_posix_pollq_create(nni_posix_pollq *pq)
 		nni_plat_pipe_close(pq->wakewfd, pq->wakerfd);
 		return (rv);
 	}
+	nni_thr_set_name(&pq->thr, "nng:poll:poll");
 	nni_mtx_init(&pq->mtx);
 	nni_thr_run(&pq->thr);
 	return (0);

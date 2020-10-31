@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -23,6 +23,10 @@ TestMain("Message Tests", {
 		So(nng_msg_alloc(&msg, 0) == 0);
 
 		Reset({ nng_msg_free(msg); });
+
+		Convey("Get opt returns ENOTSUP", {
+			So(nng_msg_getopt(msg, 0, NULL, NULL) == NNG_ENOTSUP);
+		});
 
 		Convey("Lengths are empty", {
 			So(nng_msg_len(msg) == 0);
@@ -87,10 +91,13 @@ TestMain("Message Tests", {
 		});
 
 		Convey("Clearing the body works", {
+			nng_msg_header_append(msg, "bogus", 6);
 			So(nng_msg_append(msg, "bogus", 6) == 0);
 			So(nng_msg_len(msg) == 6);
 			nng_msg_clear(msg);
 			So(nng_msg_len(msg) == 0);
+			// It shouldn't clear the header
+			So(nng_msg_header_len(msg) == 6);
 		});
 
 		Convey("We cannot delete more header than exists", {
@@ -134,7 +141,7 @@ TestMain("Message Tests", {
 			So(strcmp(nng_msg_body(msg), "abc") == 0);
 			So(nng_msg_realloc(msg, 2) == 0);
 			So(nng_msg_len(msg) == 2);
-			So(memcmp(nng_msg_body(msg), "abc", 2) == 0);
+			So(memcmp(nng_msg_body(msg), "abc", 3) == 0);
 			So(nng_msg_append(msg, "CDEF", strlen("CDEF") + 1) ==
 			    0);
 			So(nng_msg_len(msg) == strlen("abCDEF") + 1);
@@ -187,19 +194,14 @@ TestMain("Message Tests", {
 		});
 
 		Convey("Message dup copies pipe", {
-			nng_pipe p  = NNG_PIPE_INITIALIZER;
+			nng_pipe p = NNG_PIPE_INITIALIZER;
 			nng_msg *m2;
 			memset(&p, 0x22, sizeof(p));
 			nng_msg_set_pipe(msg, p);
 			So(nng_msg_dup(&m2, msg) == 0);
+			Reset({ nng_msg_free(m2); });
 			p = nng_msg_get_pipe(m2);
 			So(nng_pipe_id(p) == 0x22222222);
-		});
-
-		Convey("Missing option fails properly", {
-			char   buf[128];
-			size_t sz = sizeof(buf);
-			So(nng_msg_getopt(msg, 4545, buf, &sz) == NNG_ENOENT);
 		});
 
 		Convey("Uint32 body operations work", {
